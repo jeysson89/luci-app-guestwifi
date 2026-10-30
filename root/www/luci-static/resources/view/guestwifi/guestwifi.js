@@ -250,7 +250,7 @@ return view.extend({
 		}
 
 		/* --- save / apply ---------------------------------------------------- */
-		function persist(showApplyDialog) {
+		function persist() {
 			var errs = [];
 			for (var i = 0; i < dayRows.length; ++i) {
 				var r = dayRows[i];
@@ -282,27 +282,24 @@ return view.extend({
 			if (sched.length)
 				uci.set(cfgName, 'config', 'schedule', sched);
 
-			uci.save().then(function() {
-				if (!showApplyDialog) {
-					ui.addNotification(null, E('p', {}, _('Настройки сохранены. Нажмите «Сохранить и применить».')));
-					return;
-				}
-				return uci.apply().then(function() {
-					return fs.exec('/usr/bin/guestwifi', [ 'check' ]);
-				}).then(function() {
-					ui.addNotification(null, E('p', {}, _('Применено.')));
-					setTimeout(function() { self.renderStatus(); }, 1500);
-				});
+			return uci.save().then(function() {
+				return uci.apply();
+			}).then(function() {
+				return fs.exec('/usr/bin/guestwifi', [ 'check' ]);
+			}).then(function() {
+				ui.addNotification(null, E('p', {}, _('Применено.')));
+				setTimeout(function() { self.renderStatus(); }, 1500);
 			}).catch(function(e) {
+				if (e && e.message != null && String(e.message).indexOf('Timeout') != -1)
+					return;
+				if (e && String(e).indexOf('Timeout') != -1)
+					return;
 				ui.addNotification(_('Ошибка'), E('p', {}, String(e)), 'error');
 			});
 		}
 
-		var btnQuick = E('button', { 'class': 'btn cbi-button-edit' }, [ _('Применить сразу') ]);
-		btnQuick.addEventListener('click', function() { persist(false); });
-
 		var btnApply = E('button', { 'class': 'btn cbi-button-save important' }, [ _('Сохранить и применить') ]);
-		btnApply.addEventListener('click', function() { persist(true); });
+		btnApply.addEventListener('click', persist);
 
 		var btnOn = E('button', { 'class': 'btn cbi-button-apply' }, [ _('Включить сейчас') ]);
 		btnOn.addEventListener('click', function() {
@@ -377,7 +374,7 @@ return view.extend({
 			]),
 
 			E('div', { 'class': 'cbi-page-actions' }, [
-				btnQuick, ' ', btnApply, ' ', btnOn, ' ', btnOff
+				btnApply, ' ', btnOn, ' ', btnOff
 			])
 		]);
 	}
