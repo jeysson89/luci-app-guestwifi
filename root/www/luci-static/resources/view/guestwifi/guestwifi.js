@@ -9,7 +9,6 @@ var DAYS = [ '1', '2', '3', '4', '5', '6', '7' ];
 var DAY_NAMES = { '1': 'Пн', '2': 'Вт', '3': 'Ср', '4': 'Чт', '5': 'Пт', '6': 'Сб', '7': 'Вс' };
 /* NOTE: E is a LuCI global (bound dom.create); do NOT rebind it locally. */
 
-/* token: "1,2,5|HH:MM|HH:MM[:name]" */
 function splitToken(tok, hasName) {
 	var parts = String(tok || '').split('|');
 	return {
@@ -28,13 +27,6 @@ function validateTime(t) {
 	if (h > 23 || min > 59)
 		return _('Время вне диапазона');
 	return null;
-}
-
-function buildToken(days, start, end, name) {
-	var tv = start + '|' + end;
-	if (name != null)
-		tv += '|' + name;
-	return days + '|' + tv;
 }
 
 function refresh() {
@@ -73,19 +65,9 @@ return view.extend({
 			if (!data) {
 				rows.push(E('div', {}, _('Нет данных. Дождитесь запуска службы…')));
 			} else {
-				var st = data.state;
-				var badge = (st === '1')
+				var badge = (data.state === '1')
 					? E('span', { 'class': 'label success' }, _('ВКЛ'))
 					: E('span', { 'class': 'label important' }, _('ВЫКЛ'));
-				rows.push(E('table', { 'class': 'table' },
-					E('tr', {}, [
-						E('td', { 'width': '33%' }, _('Сеть')),
-						E('td', {}, badge)
-					]),
-					E('tr', {}, [
-						E('td', {}, _('Ожидается по расписанию')),
-						E('td', {}, (data.expected === '1') ? _('ВКЛ') : _('ВЫКЛ'))
-					])));
 
 				var t2 = [];
 				Object.keys(data).forEach(function(k) {
@@ -98,12 +80,23 @@ return view.extend({
 						E('td', {}, w['up'] ? _('интерфейс поднят') : _('интерфейс выключен'))
 					]));
 				});
+
+				rows.push(E('table', { 'class': 'table' }, [
+					E('tr', {}, [
+						E('td', { 'width': '33%' }, _('Сеть')),
+						E('td', {}, badge)
+					]),
+					E('tr', {}, [
+						E('td', {}, _('Ожидается по расписанию')),
+						E('td', {}, (data.expected === '1') ? _('ВКЛ') : _('ВЫКЛ'))
+					])
+				]));
+
 				if (t2.length)
 					rows.push(E('table', { 'class': 'table' }, t2));
 
-				var d = new Date(data['now'] * 1000);
 				rows.push(E('div', { 'class': 'cbi-value-description' },
-					_('Обновлено: ') + d.toLocaleTimeString()));
+					_('Обновлено: ') + new Date(data['now'] * 1000).toLocaleTimeString()));
 			}
 
 			dom.content(host, rows);
@@ -139,7 +132,7 @@ return view.extend({
 			uci.add(cfgName, 'config', 'config');
 			enabledVal = '0';
 		}
-		if (uci.get(cfgName, 'config', 'enabled') == null)
+		if (enabledVal == null)
 			enabledVal = '0';
 		var modeVal = uci.get(cfgName, 'config', 'mode') || 'schedule';
 		var ssidSchVal = uci.get(cfgName, 'config', 'ssid_schedule');
@@ -154,9 +147,10 @@ return view.extend({
 		this.renderStatus();
 		this.timer = window.setInterval(function() { self.renderStatus(); }, 30000);
 
-		/* --- master enable --------------------------------------------------- */
+		/* --- controls -------------------------------------------------------- */
 		var swEnabled = E('input', { 'type': 'checkbox' });
 		swEnabled.checked = (enabledVal === '1');
+
 		var swSsid = E('input', { 'type': 'checkbox' });
 		swSsid.checked = (ssidSchVal === '1');
 
@@ -209,27 +203,49 @@ return view.extend({
 				E('td', {}, [ n ]),
 				E('td', {}, [ del ])
 			]);
-			del.addEventListener('click', function() { row.remove(); });
+			del.addEventListener('click', function(ev) {
+				ev.preventDefault();
+				row.remove();
+				stageConfig();
+			});
 			ssidTBody.appendChild(row);
 		}
 		ssidToks.forEach(ssidAddRow);
-		var btnAddSsid = E('button', { 'class': 'btn cbi-button-add' }, [ '+ ', _('Добавить') ]);
-		btnAddSsid.addEventListener('click', function() { ssidAddRow('*|08:00|23:59|'); });
 
-		/* --- helpers to harvest data ----------------------------------------- */
-		function collectSchedule() {
-			var toks = [];
+		var btnAddSsid = E('button', { 'class': 'btn cbi-button-add' }, [ '+ ', _('Добавить') ]);
+		btnAddSsid.addEventListener('click', function(ev) {
+			ev.preventDefault();
+			ssidAddRow('*|08:00|23:59|');
+			stageConfig();
+		});
+
+		/* --- staging on change (standard Save & Apply applies it) -------------- */
+		var stageTimer = null;
+
+		function stageConfig() {
+			if (stageTimer != null)
+				return;
+			stageTimer = window.setTimeout(function() {
+				stageTimer = null;
+				deployStage();
+			}, 500);
+		}
+
+		function deployStage() {
+			var errs = [];
+			var sched = [];
+			var ssid = [];
+
 			for (var i = 0; i < dayRows.length; ++i) {
 				var row = dayRows[i];
 				if (!row._gw.cb.checked)
 					continue;
-				toks.push(buildToken(row._gw.day, row._gw.t1.value, row._gw.t2.value));
+				sched.push(row._gw.day + '|' + row._gw.t1.value + '|' + row._gw.t2.value);
+				var err = validateTime(row._gw.t1.value) || validateTime(row._gw.t2.value);
+				if (err)
+					errs.push(DAY_NAMES[row._gw.day] + ': ' + err);
 			}
-			return toks;
-		}
 
-		function collectSsid(errors) {
-			var toks = [];
 			ssidTBody.childNodes.forEach(function(tr) {
 				var tds = tr.childNodes;
 				var days = tds[0].firstChild.value.trim() || '*';
@@ -241,86 +257,51 @@ return view.extend({
 				if (!err && n === '')
 					err = _('Пустое имя SSID');
 				if (err) {
-					errors.push(err + ' («' + n + '»)');
+					errs.push(err + ' («' + n + '»)');
 					return;
 				}
-				toks.push(buildToken(days, s, e, n));
+				ssid.push(days + '|' + s + '|' + e + '|' + n);
 			});
-			return toks;
-		}
 
-		/* --- save / apply ---------------------------------------------------- */
-		function persist() {
-			var errs = [];
-			for (var i = 0; i < dayRows.length; ++i) {
-				var r = dayRows[i];
-				if (!r._gw.cb.checked)
-					continue;
-				var err = validateTime(r._gw.t1.value) || validateTime(r._gw.t2.value);
-				if (err)
-					errs.push(DAY_NAMES[r._gw.day] + ': ' + err);
-			}
-			var ssidToks = collectSsid(errs);
-
+			/* не даём применить ошибочные значения, но staje их не обновляем */
 			if (errs.length) {
-				ui.addNotification(_('Ошибка сохранения'),
-					E('p', {}, errs.join(' · ')), 'error');
+				ui.addNotification(_('Ошибка в расписании'), E('p', {}, errs.join(' · ')), 'error');
 				return;
 			}
 
 			uci.set(cfgName, 'config', 'enabled', swEnabled.checked ? '1' : '0');
 			uci.set(cfgName, 'config', 'mode', selMode.value);
 			uci.set(cfgName, 'config', 'ssid_schedule', swSsid.checked ? '1' : '0');
-			if (ssidToks.length)
-				uci.set(cfgName, 'config', 'ssid_list', ssidToks);
-			else
-				uci.unset(cfgName, 'config', 'ssid_list');
 
-			/* schedule list: перезаписываем полностью */
 			uci.unset(cfgName, 'config', 'schedule');
-			var sched = collectSchedule();
 			if (sched.length)
 				uci.set(cfgName, 'config', 'schedule', sched);
 
-			return uci.save().then(function() {
-				return uci.apply();
-			}).then(function() {
-				return fs.exec('/usr/bin/guestwifi', [ 'check' ]);
-			}).then(function() {
-				ui.addNotification(null, E('p', {}, _('Применено.')));
-				setTimeout(function() { self.renderStatus(); }, 1500);
-			}).catch(function(e) {
-				if (e && e.message != null && String(e.message).indexOf('Timeout') != -1)
-					return;
-				if (e && String(e).indexOf('Timeout') != -1)
-					return;
-				ui.addNotification(_('Ошибка'), E('p', {}, String(e)), 'error');
-			});
+			uci.unset(cfgName, 'config', 'ssid_list');
+			if (ssid.length)
+				uci.set(cfgName, 'config', 'ssid_list', ssid);
+
+			uci.save();
 		}
 
-		var btnApply = E('button', { 'class': 'btn cbi-button-save important' }, [ _('Сохранить и применить') ]);
-		btnApply.addEventListener('click', persist);
-
-		var btnOn = E('button', { 'class': 'btn cbi-button-apply' }, [ _('Включить сейчас') ]);
-		btnOn.addEventListener('click', function() {
-			fs.exec('/usr/bin/guestwifi', [ 'on' ]).then(function() {
-				ui.addNotification(null, E('p', {}, _('Включено')));
-				setTimeout(function() { self.renderStatus(); }, 1500);
-			});
+		function hook(el) {
+			if (el)
+				el.addEventListener('change', stageConfig);
+		}
+		hook(swEnabled); hook(selMode); hook(swSsid);
+		dayRows.forEach(function(r) {
+			hook(r._gw.cb); hook(r._gw.t1); hook(r._gw.t2);
 		});
-		var btnOff = E('button', { 'class': 'btn cbi-button-reset' }, [ _('Выключить сейчас') ]);
-		btnOff.addEventListener('click', function() {
-			fs.exec('/usr/bin/guestwifi', [ 'off' ]).then(function() {
-				ui.addNotification(null, E('p', {}, _('Выключено')));
-				setTimeout(function() { self.renderStatus(); }, 1500);
-			});
+		ssidTBody.addEventListener('change', function(ev) {
+			if (ev.target && ev.target.tagName == 'INPUT' && ev.target.type != 'button')
+				stageConfig();
 		});
 
 		/* --- layout ------------------------------------------------------------ */
 		return E('div', {}, [
 			statusHost,
 			E('div', { 'class': 'cbi-map-descr' },
-				_('Гостевая сеть с отключением по времени и сменой имени (SSID) по расписанию.')),
+				_('Гостевая сеть с отключением по времени и сменой имени (SSID) по расписанию. Изменения применяются штатной кнопкой «Save & Apply».')),
 
 			E('fieldset', { 'class': 'cbi-section' }, [
 				E('legend', {}, _('Основное')),
@@ -371,10 +352,6 @@ return view.extend({
 				btnAddSsid,
 				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
 					_('Первое совпадающее правило сверху применяет имя. Дни: список через запятую (1=Пн..7=Вс), диапазоны 1-5 или «*» для всех. Пробелы в имени SSID заменяются на «_».')) ])
-			]),
-
-			E('div', { 'class': 'cbi-page-actions' }, [
-				btnApply, ' ', btnOn, ' ', btnOff
 			])
 		]);
 	}
