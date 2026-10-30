@@ -1,0 +1,15 @@
+config config 'config'
+	option enabled '0'
+	option mode 'schedule'
+	# mode: always | schedule | off
+	# Подсети интерфейсов гостевого Wi-Fi (создаются uci-defaults)
+	list wifi 'guestg'
+	list wifi 'guesta'
+	# Расписание работы сети: '<дни>|<HH:MM>|<HH:MM>'  дни: 1..7 (1=Пн,7=Вс) или '*'
+	list schedule '1,2,3,4,5|08:00|23:30'
+	list schedule '6,7|10:00|23:59'
+	# Расписание смены имени SSID: '<дни>|<HH:MM>|<HH:MM>|<имя>' (первое совпадение выигрывает)
+	# Пробелы в имени SSID заменяются на '_' (ограничение uci get для списков)
+	option ssid_schedule '1'
+	list ssid_list '*|09:00|23:59|Guest_Day'
+	list ssid_list '*|00:00|09:00|Guest_Night'

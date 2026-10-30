@@ -1,0 +1,24 @@
+{
+  "luci-app-guestwifi": {
+    "description": "Доступ к приложению Гостевой Wi-Fi",
+    "read": {
+      "ubus": {
+        "luci": [ "getVersion" ],
+        "uci": [ "get", "state", "changes" ]
+      },
+      "uci": [ "guestwifi", "wireless" ],
+      "file": {
+        "/var/run/guestwifi.json": [ "read" ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "uci": [ "add", "set", "delete", "order", "commit", "apply", "confirm", "rollback" ]
+      },
+      "file": {
+        "/usr/bin/guestwifi": [ "exec" ]
+      },
+      "uci": [ "guestwifi" ]
+    }
+  }
+}

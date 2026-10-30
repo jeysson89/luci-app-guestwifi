@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+boot() {
+	# network and wireless must be up before we can control ifaces
+	( sleep 20 && /usr/bin/guestwifi check ) &
+}
+
+start() {
+	/usr/bin/guestwifi check
+}
+
+stop() {
+	:
+}

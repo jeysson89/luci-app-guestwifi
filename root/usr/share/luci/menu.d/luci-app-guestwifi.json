@@ -1,0 +1,14 @@
+{
+  "admin/network/guestwifi": {
+    "title": "Гостевой Wi-Fi",
+    "order": 65,
+    "action": {
+      "type": "view",
+      "path": "guestwifi/guestwifi"
+    },
+    "depends": {
+      "acl": [ "luci-app-guestwifi" ],
+      "uci": { "guestwifi": true }
+    }
+  }
+}

@@ -1,0 +1,233 @@
+#!/bin/sh
+# guestwifi - backend for luci-app-guestwifi
+# Usage: guestwifi check|status|on|off|help
+
+CFG="guestwifi"
+CONFFILE="/etc/config/$CFG"
+STATE="/var/run/guestwifi.state"
+STATUS="/var/run/guestwifi.json"
+
+log() { logger -t guestwifi "$1"; }
+
+uciget() { uci -q get "$1"; }
+
+# list_get OPTION -> prints each list element on its own line.
+# Reads the raw config file because `uci get` returns all elements
+# space-joined with quoting, which breaks tokens containing spaces.
+list_get() {
+	sed -n "s/^[ 	]*list[ 	]*$1[ 	]*//p" "$CONFFILE" |
+	sed -e "s/^['\"]//" -e "s/['\"][ 	]*$//"
+}
+
+# --- helpers -----------------------------------------------------------
+
+# day number 1..7 (1=Mon .. 7=Sun)
+daynum() {
+	local w
+	w=$(date +%w)
+	[ "$w" = "0" ] && w=7
+	echo "$w"
+}
+
+# decimal int from "08"-style string (busybox ash lacks base# literals)
+dec10() {
+	local n="$1"
+	while [ "${#n}" -gt 1 ] && [ "${n#0}" != "$n" ]; do
+		n=${n#0}
+	done
+	echo "$n"
+}
+
+# minutes since midnight
+nowmin() {
+	local h m
+	h=$(date +%H); m=$(date +%M)
+	echo $(( $(dec10 "$h") * 60 + $(dec10 "$m") ))
+}
+
+# day_match DAYS DAYNUM -> echoes 1 on match (0 otherwise)
+# DAYS: '*', '1,3,5' and/or ranges '1-4' (1=Mon..7=Sun)
+day_match() {
+	local days="$1" d="$2" bit=0 part a b
+	[ "$days" = "*" ] && { echo 1; return; }
+	for part in $(echo "$days" | tr ',' ' '); do
+		case "$part" in
+			*-*)
+				a=$(dec10 "${part%%-*}"); b=$(dec10 "${part##*-}")
+				[ "$d" -ge "$a" ] 2>/dev/null && [ "$d" -le "$b" ] 2>/dev/null && bit=1
+				;;
+			*[!0-9]*) ;;
+			*) [ "$d" = "$part" ] && bit=1 ;;
+		esac
+	done
+	echo "$bit"
+}
+
+# window_match DAYS START END: START/END "HH:MM"; window matches day of START
+# (windows may cross midnight; [start, end) semantics)
+window_match() {
+	local days="$1" s="$2" e="$3" sm em m
+	m=$(nowmin)
+	sm=$(( $(dec10 "${s%%:*}") * 60 + $(dec10 "${s##*:}") ))
+	em=$(( $(dec10 "${e%%:*}") * 60 + $(dec10 "${e##*:}") ))
+	[ "$(day_match "$days" "$(daynum)")" = "1" ] || { echo 0; return; }
+	if [ "$em" -gt "$sm" ]; then
+		[ "$m" -ge "$sm" ] && [ "$m" -lt "$em" ] && { echo 1; return; }
+	else
+		[ "$m" -ge "$sm" ] && { echo 1; return; }
+		[ "$m" -lt "$em" ] && { echo 1; return; }
+	fi
+	echo 0
+}
+
+# -----------------------------------------------------------------------
+
+wifi_ifaces() {
+	list_get wifi
+}
+
+is_on() {
+	local i d
+	for i in $(wifi_ifaces); do
+		d=$(uciget "wireless.$i.disabled")
+		[ "$d" != "1" ] && { echo 1; return; }
+	done
+	echo 0
+}
+
+schedule_on() {
+	local tok days s e rest r
+	r=$(list_get schedule | while IFS=' ' read -r tok; do
+		[ -n "$tok" ] || continue
+		days=${tok%%|*}
+		rest=${tok#*|}
+		s=${rest%%|*}; e=${rest##*|}
+		[ -n "$days" ] && [ -n "$s" ] && [ "$e" != "$tok" ] || continue
+		case "$(window_match "$days" "$s" "$e")" in
+			1) echo 1; return ;;
+		esac
+	done)
+	[ "$r" = "1" ] && { echo 1; return; }
+	echo 0
+}
+
+desired_ssid() {
+	local tok days s e name rest r
+	r=$(list_get ssid_list | while IFS=' ' read -r tok; do
+		[ -n "$tok" ] || continue
+		days=${tok%%|*}; rest=${tok#*|}
+		s=${rest%%|*};   rest=${rest#*|}
+		e=${rest%%|*};   name=${rest##*|}
+		[ -n "$days" ] && [ -n "$s" ] && [ -n "$e" ] && [ -n "$name" ] && [ "$e" != "$tok" ] || continue
+		case "$(window_match "$days" "$s" "$e")" in
+			1) echo "$name"; return ;;
+		esac
+	done)
+	echo "$r"
+}
+
+apply_state() {
+	# $1 = 0|1 (on/off desired), $2 = ssid or ""
+	local want="$1" ssid="$2" i d net_enabled=0 dirty=0
+	[ "$want" = "1" ] && net_enabled=1
+
+	for i in $(wifi_ifaces); do
+		[ -n "$(uciget "wireless.$i")" ] || continue
+		d=$(uciget "wireless.$i.disabled")
+		local newd=$(( 1 - net_enabled ))
+		if [ "$d" != "$newd" ]; then
+			uci set "wireless.$i.disabled=$newd"
+			dirty=1
+		fi
+		if [ "$net_enabled" = "1" ] && [ -n "$ssid" ]; then
+			local cur=$(uciget "wireless.$i.ssid")
+			if [ "$cur" != "$ssid" ]; then
+				uci set "wireless.$i.ssid=$ssid"
+				dirty=1
+				log "SSID on '$i' -> '$ssid'"
+			fi
+		fi
+	done
+
+	if [ "$dirty" = "1" ]; then
+		uci commit wireless
+		wifi reconf >/dev/null 2>&1 || wifi up >/dev/null 2>&1 || wifi reload >/dev/null 2>&1
+		log "wireless reloaded"
+	fi
+}
+
+write_status() {
+	local on="$1" want="$2" ts i cur
+	ts=$(date +%s)
+	{
+		echo -n "{\"now\":$ts,\"state\":\"$on\",\"expected\":\"$want\","
+		first=1
+		for i in $(wifi_ifaces); do
+			cur=$(uciget "wireless.$i.ssid")
+			d=$(uciget "wireless.$i.disabled")
+			[ "$first" = "1" ] && first=0 || echo -n ","
+			echo -n "\"$i\":{\"ssid\":\"$(printf '%s' "$cur" | json_quote)\""
+			echo -n ",\"up\":$([ "$d" != "1" ] && echo true || echo false)}"
+		done
+		echo "}"
+	} > "$STATUS" 2>/dev/null
+}
+
+json_quote() {
+	sed "s/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g"
+}
+
+do_check() {
+	local enabled want ssid
+	enabled=$(uciget "$CFG.config.enabled")
+	[ "$enabled" = "1" ] || enabled=0
+
+	want=0
+	if [ "$enabled" = "1" ]; then
+		case "$(uciget "$CFG.config.mode")" in
+			always)  want=1 ;;
+			off)     want=0 ;;
+			*)       want=$(schedule_on) ;;
+		esac
+	fi
+
+	ssid=""
+	if [ "$want" = "1" ] && [ "$(uciget "$CFG.config.ssid_schedule")" = "1" ]; then
+		ssid=$(desired_ssid)
+	fi
+
+	local cur_on="$(is_on)"
+	local last_ssid=$(sed -n 's/^ssid=//p' "$STATE" 2>/dev/null)
+	if [ "$cur_on" != "$want" ] || [ "$ssid" != "$last_ssid" ]; then
+		apply_state "$want" "$ssid"
+		cur_on="$(is_on)"
+	fi
+
+	# persist relevant tx state
+	{
+		echo "on=$cur_on"
+		echo "ssid=$ssid"
+	} > "$STATE"
+
+	write_status "$cur_on" "$want"
+}
+
+do_status() {
+	[ -f "$STATUS" ] && { cat "$STATUS"; echo; return; }
+	do_check
+}
+
+do_on()  { uci set "$CFG.config.enabled=1"; uci commit "$CFG"; do_check; }
+do_off() { uci set "$CFG.config.enabled=0"; uci commit "$CFG"; do_check; }
+
+do_help() {
+	echo "Usage: guestwifi {check|status|on|off}"
+}
+
+case "${1:-check}" in
+	check)  do_check ;;
+	status) do_status ;;
+	on)     do_on ;;
+	off)    do_off ;;
+	*)      do_help ;;
+esac

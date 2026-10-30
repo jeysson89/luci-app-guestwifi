@@ -1,0 +1,129 @@
+#!/bin/sh
+# uci-defaults for luci-app-guestwifi: prepares guest network, dhcp,
+# firewall zone, wifi-ifaces on every radio and cron entry.
+
+# --- network ----------------------------------------------------------------
+if ! uci -q get network.guest >/dev/null; then
+	uci -q set network.guest_dev=device
+	uci -q set network.guest_dev.name='br-guest'
+	uci -q set network.guest_dev.type='bridge'
+	uci -q set network.guest=interface
+	uci -q set network.guest.device='br-guest'
+	uci -q set network.guest.proto='static'
+	uci -q set network.guest.ipaddr='192.168.9.1'
+	uci -q set network.guest.netmask='255.255.255.0'
+fi
+
+# --- dhcp -------------------------------------------------------------------
+if ! uci -q get dhcp.guest >/dev/null; then
+	uci -q set dhcp.guest=dhcp
+	uci -q set dhcp.guest.interface='guest'
+	uci -q set dhcp.guest.start='50'
+	uci -q set dhcp.guest.limit='200'
+	uci -q set dhcp.guest.leasetime='2h'
+fi
+
+# --- firewall ---------------------------------------------------------------
+cfg_add_fw() {
+	uci -q add firewall "$1" >/dev/null
+}
+if ! (uci -q show firewall 2>/dev/null | grep -q "name='guest'"); then
+	zn=$(uci -q add firewall zone)
+	uci -q set "firewall.$zn.name=guest"
+	uci -q set "firewall.$zn.input=REJECT"
+	uci -q set "firewall.$zn.output=ACCEPT"
+	uci -q set "firewall.$zn.forward=REJECT"
+	uci -q add_list "firewall.$zn.network=guest"
+	# allow dhcp + dns from guests
+	n1=$(uci -q add firewall rule)
+	uci -q set "firewall.$n1.name=guest_dhcp"
+	uci -q set "firewall.$n1.src=guest"
+	uci -q set "firewall.$n1.proto=udp"
+	uci -q set "firewall.$n1.dest_port=67-68"
+	uci -q set "firewall.$n1.target=ACCEPT"
+	uci -q set "firewall.$n1.family=any"
+	n2=$(uci -q add firewall rule)
+	uci -q set "firewall.$n2.name=guest_dns"
+	uci -q set "firewall.$n2.src=guest"
+	uci -q set "firewall.$n2.proto=tcpudp"
+	uci -q set "firewall.$n2.dest_port=53"
+	uci -q set "firewall.$n2.target=ACCEPT"
+	uci -q set "firewall.$n2.family=any"
+	# forward guest -> wan only
+	fw=$(uci -q add firewall forwarding)
+	uci -q set "firewall.$fw.src=guest"
+	uci -q set "firewall.$fw.dest=wan"
+fi
+
+# --- wireless: add a guest AP on each radio lacking one ---------------------
+# rebuild app list (idempotent across re-runs)
+uci -q delete guestwifi.config.wifi
+# collect radios
+# collect radios
+radios=$(uci -q show wireless 2>/dev/null | sed -n 's/^\(wireless\.[^.]*\)=wifi-device.*/\1/p')
+for r in $radios; do
+   # radio id without prefix: wireless.radio0 -> radio0
+	rid=${r#wireless.}
+	already=$(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\($rid\.[^.]*\)\.network=.guest.$/\1/p")
+	[ -n "$already" ] && continue
+	dev=$(uci -q get "wireless.$rid.band" 2>/dev/null)
+	band_h=$(uci -q get "wireless.$rid.channel")
+	[ -n "$band_h" ] || continue
+	if [ "$band_h" = "1" ] || [ "$band_h" -lt 14 ] 2>/dev/null; then
+		sname="Guest (2.4GHz)"
+	else
+		sname="Guest (5GHz)"
+	fi
+	iw=$(uci -q add wireless wifi-iface)
+	uci -q set "wireless.$iw.device=$rid"
+	uci -q set "wireless.$iw.mode=ap"
+	uci -q set "wireless.$iw.network=guest"
+	uci -q set "wireless.$iw.ssid=$sname"
+	uci -q set "wireless.$iw.isolate=1"
+	uci -q set "wireless.$iw.disabled=1"
+	# append to app config list
+	case "$rid" in
+		radio0) iwname="guestg" ;;
+		radio1) iwname="guesta" ;;
+		*) iwname="guestx$rid" ;;
+	esac
+	uci -q rename "wireless.$iw=$iwname" 2>/dev/null || true
+	case "$(uci -q get "wireless.$iwname")" in
+		wifi-iface) act=$iwname ;;    # rename succeeded
+		*wifi-iface*) act=$iwname ;;
+		*) act=$iw ;;
+	esac
+	uci -q add_list "guestwifi.config.wifi=$act"
+done
+
+# --- cron: schedule checker every minute -----------------------------------
+CRONLINE='* * * * * /usr/bin/guestwifi check >/dev/null 2>&1'
+CRONTAB=/etc/crontabs/root
+touch "$CRONTAB" 2>/dev/null
+if ! grep -qxF "$CRONLINE" "$CRONTAB" 2>/dev/null; then
+	echo "$CRONLINE" >> "$CRONTAB"
+fi
+# dedupe potential leftovers
+tmp_cr=$(mktemp 2>/dev/null || echo /tmp/gwc.$$)
+grep -vxF "$CRONLINE" "$CRONTAB" > "$tmp_cr" 2>/dev/null
+echo "$CRONLINE" >> "$tmp_cr"
+mv "$tmp_cr" "$CRONTAB"
+/etc/init.d/cron restart >/dev/null 2>&1
+
+# --- enable init script and commit -----------------------------------------
+/etc/init.d/guestwifi enable >/dev/null 2>&1
+uci commit network 2>/dev/null
+uci commit dhcp 2>/dev/null
+uci commit firewall 2>/dev/null
+uci commit wireless 2>/dev/null
+uci commit guestwifi 2>/dev/null
+
+# run first state resolution in background (do not block boot)
+/usr/bin/guestwifi check >/dev/null 2>&1 &
+
+# reload network/firewall/dhcp so the new interfaces take effect
+/etc/init.d/network reload >/dev/null 2>&1
+/etc/init.d/firewall restart >/dev/null 2>&1
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+
+exit 0
