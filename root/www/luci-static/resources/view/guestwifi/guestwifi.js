@@ -139,7 +139,8 @@ return view.extend({
 		if (ssidSchVal == null) ssidSchVal = '1';
 
 		var scheduleToks = uci.get(cfgName, 'config', 'schedule') || [];
-		var ssidToks = uci.get(cfgName, 'config', 'ssid_list') || [];
+		var ssidBaseVal = uci.get(cfgName, 'config', 'ssid_base');
+		if (ssidBaseVal == null) ssidBaseVal = 'Guest';
 
 		var grid = this.scheduleGrid(scheduleToks);
 
@@ -182,42 +183,22 @@ return view.extend({
 			return row;
 		});
 
-		/* --- ssid list -------------------------------------------------------- */
-		var ssidTBody = E('tbody', {});
-		function ssidAddRow(tok) {
-			var t = splitToken(tok, true);
-			var days = E('input', { 'type': 'text', 'class': 'gw-mini', 'placeholder': '*, 1-5, 6,7' });
-			var s = E('input', { 'type': 'time', 'class': 'gw-time' });
-			var e = E('input', { 'type': 'time', 'class': 'gw-time' });
-			var n = E('input', { 'type': 'text', 'class': 'gw-wide' });
-			days.value = t.days;
-			s.value = t.start;
-			e.value = t.end;
-			n.value = t.name;
-			var del = E('button', { 'class': 'btn cbi-button-remove' }, [ '✕' ]);
-			var row = E('tr', {}, [
-				E('td', {}, [ days ]),
-				E('td', {}, [ s ]),
-				E('td', {}, [ ' — ' ]),
-				E('td', {}, [ e ]),
-				E('td', {}, [ n ]),
-				E('td', {}, [ del ])
-			]);
-			del.addEventListener('click', function(ev) {
-				ev.preventDefault();
-				row.remove();
-				stageConfig();
-			});
-			ssidTBody.appendChild(row);
+		/* --- ssid: имя + дата (автогенерация при смене даты) ------------------ */
+		var inSsidBase = E('input', { 'type': 'text', 'class': 'gw-wide', 'placeholder': 'Guest' });
+		inSsidBase.value = ssidBaseVal;
+		var ssidPreview = E('p', {}, [ E('span', { 'class': 'cbi-value-description' }, '') ]);
+		function updatePreview() {
+			var base = (inSsidBase.value || '').trim();
+			var d = new Date();
+			var dd = ('0' + d.getDate()).slice(-2);
+			var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+			var yy = d.getFullYear();
+			dom.content(ssidPreview, [ E('span', { 'class': 'cbi-value-description' },
+				_('Сеть назовётся: ') + base + '_' + dd + '.' + mm + '.' + yy +
+				' — ' + _('имя изменится автоматически при смене даты.')) ]);
 		}
-		ssidToks.forEach(ssidAddRow);
-
-		var btnAddSsid = E('button', { 'class': 'btn cbi-button-add' }, [ '+ ', _('Добавить') ]);
-		btnAddSsid.addEventListener('click', function(ev) {
-			ev.preventDefault();
-			ssidAddRow('*|08:00|23:59|');
-			stageConfig();
-		});
+		inSsidBase.addEventListener('input', updatePreview);
+		updatePreview();
 
 		/* --- staging on change (standard Save & Apply applies it) -------------- */
 		var stageTimer = null;
@@ -234,7 +215,6 @@ return view.extend({
 		function deployStage() {
 			var errs = [];
 			var sched = [];
-			var ssid = [];
 
 			for (var i = 0; i < dayRows.length; ++i) {
 				var row = dayRows[i];
@@ -246,24 +226,11 @@ return view.extend({
 					errs.push(DAY_NAMES[row._gw.day] + ': ' + err);
 			}
 
-			ssidTBody.childNodes.forEach(function(tr) {
-				var tds = tr.childNodes;
-				var days = tds[0].firstChild.value.trim() || '*';
-				var s = tds[1].firstChild.value;
-				var e = tds[3].firstChild.value;
-				var n = tds[4].firstChild.value.trim().replace(/[ \t]+/g, '_');
+			/* ошибки в рабочем расписании блокируют staging, но SSID-имя не критично */
+			var base = (inSsidBase.value || '').trim();
+			if (!base && swSsid.checked)
+				errs.push(_('Укажите имя сети SSID'));
 
-				var err = validateTime(s) || validateTime(e);
-				if (!err && n === '')
-					err = _('Пустое имя SSID');
-				if (err) {
-					errs.push(err + ' («' + n + '»)');
-					return;
-				}
-				ssid.push(days + '|' + s + '|' + e + '|' + n);
-			});
-
-			/* не даём применить ошибочные значения, но staje их не обновляем */
 			if (errs.length) {
 				ui.addNotification(_('Ошибка в расписании'), E('p', {}, errs.join(' · ')), 'error');
 				return;
@@ -272,14 +239,13 @@ return view.extend({
 			uci.set(cfgName, 'config', 'enabled', swEnabled.checked ? '1' : '0');
 			uci.set(cfgName, 'config', 'mode', selMode.value);
 			uci.set(cfgName, 'config', 'ssid_schedule', swSsid.checked ? '1' : '0');
+			uci.set(cfgName, 'config', 'ssid_base', base);
 
 			uci.unset(cfgName, 'config', 'schedule');
 			if (sched.length)
 				uci.set(cfgName, 'config', 'schedule', sched);
 
 			uci.unset(cfgName, 'config', 'ssid_list');
-			if (ssid.length)
-				uci.set(cfgName, 'config', 'ssid_list', ssid);
 
 			uci.save();
 		}
@@ -288,13 +254,9 @@ return view.extend({
 			if (el)
 				el.addEventListener('change', stageConfig);
 		}
-		hook(swEnabled); hook(selMode); hook(swSsid);
+		hook(swEnabled); hook(selMode); hook(swSsid); hook(inSsidBase);
 		dayRows.forEach(function(r) {
 			hook(r._gw.cb); hook(r._gw.t1); hook(r._gw.t2);
-		});
-		ssidTBody.addEventListener('change', function(ev) {
-			if (ev.target && ev.target.tagName == 'INPUT' && ev.target.type != 'button')
-				stageConfig();
 		});
 
 		/* --- layout ------------------------------------------------------------ */
@@ -314,9 +276,18 @@ return view.extend({
 					E('div', { 'class': 'cbi-value-field' }, [ selMode ])
 				]),
 				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title' }, _('Смена SSID по времени')),
+					E('label', { 'class': 'cbi-value-title' }, _('Смена SSID (вкл/выкл)')),
 					E('div', { 'class': 'cbi-value-field' }, [ swSsid ])
 				])
+			]),
+
+			E('fieldset', { 'class': 'cbi-section' }, [
+				E('legend', {}, _('Имя сети (SSID)')),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('Указываемое имя сети')),
+					E('div', { 'class': 'cbi-value-field' }, [ inSsidBase ])
+				]),
+				ssidPreview
 			]),
 
 			E('fieldset', { 'class': 'cbi-section' }, [
@@ -332,26 +303,6 @@ return view.extend({
 				]),
 				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
 					_('Интервал может пересекать полночь (напр. 22:00 — 02:00).')) ])
-			]),
-
-			E('fieldset', { 'class': 'cbi-section' }, [
-				E('legend', {}, _('Расписание смены SSID')),
-				E('table', { 'class': 'table' }, [
-					E('thead', {}, [
-						E('tr', {}, [
-							E('th', {}, _('Дни')),
-							E('th', {}, _('Начало')),
-							E('th', {}, ''),
-							E('th', {}, _('Конец')),
-							E('th', {}, _('Имя SSID')),
-							E('th', {}, '')
-						])
-					]),
-					ssidTBody
-				]),
-				btnAddSsid,
-				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
-					_('Первое совпадающее правило сверху применяет имя. Дни: список через запятую (1=Пн..7=Вс), диапазоны 1-5 или «*» для всех. Пробелы в имени SSID заменяются на «_».')) ])
 			])
 		]);
 	}

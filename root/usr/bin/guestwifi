@@ -112,18 +112,12 @@ schedule_on() {
 }
 
 desired_ssid() {
-	local tok days s e name rest r
-	r=$(list_get ssid_list | while IFS=' ' read -r tok; do
-		[ -n "$tok" ] || continue
-		days=${tok%%|*}; rest=${tok#*|}
-		s=${rest%%|*};   rest=${rest#*|}
-		e=${rest%%|*};   name=${rest##*|}
-		[ -n "$days" ] && [ -n "$s" ] && [ -n "$e" ] && [ -n "$name" ] && [ "$e" != "$tok" ] || continue
-		case "$(window_match "$days" "$s" "$e")" in
-			1) echo "$name"; return ;;
-		esac
-	done)
-	echo "$r"
+	# SSID = <указанное имя>_<текущая дата>; переименовывается автоматически
+	# при смене даты (check запускается cron'ом каждую минуту)
+	[ "$(uciget "$CFG.config.ssid_schedule")" = "1" ] || { echo ""; return; }
+	local base
+	base=$(uciget "$CFG.config.ssid_base")
+	echo "${base}_$(date +%d.%m.%Y)"
 }
 
 apply_state() {
