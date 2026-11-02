@@ -2,6 +2,11 @@
 # uci-defaults for luci-app-guestwifi: prepares guest network, dhcp,
 # firewall zone, wifi-ifaces on every radio and cron entry.
 
+# --- packages for bandwidth limiting (best effort, needs Internet) -----------
+if ! command -v tc >/dev/null 2>&1; then
+	apk add tc kmod-sched-core kmod-sched-act-police >/dev/null 2>&1 &
+fi
+
 # --- network ----------------------------------------------------------------
 if ! uci -q get network.guest >/dev/null; then
 	uci -q set network.guest_dev=device

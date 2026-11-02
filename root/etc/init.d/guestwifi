@@ -12,6 +12,10 @@ start() {
 	/usr/bin/guestwifi check
 }
 
+reload() {
+	/usr/bin/guestwifi check
+}
+
 stop() {
 	:
 }

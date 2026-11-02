@@ -120,6 +120,102 @@ desired_ssid() {
 	echo "${base}_$(date +%d.%m.%Y)"
 }
 
+# --- bandwidth limiting ------------------------------------------------
+
+tcpath() {
+	command -v tc 2>/dev/null || echo /sbin/tc
+}
+
+# guest wifi kernel interfaces: ports of br-guest (e.g. phy0-ap1, phy1-ap1)
+bridge_members() {
+	ip -o link show 2>/dev/null | awk -F': ' '/master br-guest/ {print $2}'
+}
+
+bg_rate() {
+	case "${1:-}" in *[!0-9]*|"") echo 0 ;; *) local n; n=$(dec10 "$1"); echo ${n:-0} ;; esac
+}
+
+shaper_running() {
+	local TC dev
+	TC="$(tcpath)"
+	[ -n "$TC" ] && [ -x "$TC" ] || return 1
+	for dev in $(bridge_members); do
+		"$TC" qdisc show dev "$dev" root 2>/dev/null | grep -q htb && return 0
+	done
+	return 1
+}
+
+shaper_apply() {
+	local TC down up dev
+	TC="$(tcpath)"
+	[ -n "$TC" ] && [ -x "$TC" ] || { log "tc не найден — ограничение скорости пропущено"; return 0; }
+
+	down=$(bg_rate "$(uciget "$CFG.config.limit_down")")
+	up=$(bg_rate "$(uciget "$CFG.config.limit_up")")
+
+	modprobe sch_htb 2>/dev/null
+	modprobe sch_ingress 2>/dev/null
+	modprobe act_police 2>/dev/null
+	modprobe cls_matchall 2>/dev/null
+
+	for dev in $(bridge_members); do
+		[ -d "/sys/class/net/$dev" ] || continue
+
+		if [ "$down" -gt 0 ]; then
+			$TC qdisc replace dev "$dev" root handle 1: htb default 10 2>/dev/null
+			$TC class replace dev "$dev" parent 1: classid 1:10 htb rate "${down}kbit" ceil "${down}kbit" 2>/dev/null
+		else
+			$TC qdisc del dev "$dev" root 2>/dev/null
+		fi
+
+		if [ "$up" -gt 0 ]; then
+			$TC qdisc replace dev "$dev" ingress 2>/dev/null
+			$TC filter replace dev "$dev" ingress matchall action police \
+				rate "${up}kbit" burst 512k conform-exceed drop 2>/dev/null
+		else
+			$TC qdisc del dev "$dev" ingress 2>/dev/null
+		fi
+	done
+}
+
+shaper_clear() {
+	local TC dev
+	TC="$(tcpath)"
+	[ -n "$TC" ] && [ -x "$TC" ] || return 0
+	for dev in $(bridge_members); do
+		[ -d "/sys/class/net/$dev" ] || continue
+		$TC qdisc del dev "$dev" root 2>/dev/null
+		$TC qdisc del dev "$dev" ingress 2>/dev/null
+	done
+}
+
+# --- firewall: guests' access to the router itself ----------------------
+
+# section id of firewall zone named $1 (e.g. @zone[2])
+guest_zone_id() {
+	uci show firewall 2>/dev/null |
+		sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='$1'$/\1/p"
+}
+
+fw_sync() {
+	local block want cur z
+	z=$(guest_zone_id guest)
+	[ -n "$z" ] || return 0
+
+	block=$(uciget "$CFG.config.fw_block_router")
+	[ "$block" = "1" ] && want=REJECT || want=ACCEPT
+
+	cur=$(uciget "firewall.$z.input")
+	cur=${cur:-ACCEPT}
+	if [ "$cur" != "$want" ]; then
+		uci set "firewall.$z.input=$want"
+		uci commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1 || fw4 reload >/dev/null 2>&1
+		log "firewall: гостевая зона input=$want"
+	fi
+}
+
+
 apply_state() {
 	# $1 = 0|1 (on/off desired), $2 = ssid or ""
 	local want="$1" ssid="$2" i d net_enabled=0 dirty=0
@@ -196,6 +292,18 @@ do_check() {
 		apply_state "$want" "$ssid"
 		cur_on="$(is_on)"
 	fi
+
+	# скорость: полоса ограничивается только у активной сети
+	if [ "$want" = "1" ] && [ "$(uciget "$CFG.config.limit_enabled")" = "1" ]; then
+		shaper_apply
+	else
+		if shaper_running; then
+			shaper_clear
+		fi
+	fi
+
+	# доступ гостей к самому роутеру (firewall zone input)
+	fw_sync
 
 	# persist relevant tx state
 	{

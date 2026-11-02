@@ -12,3 +12,10 @@ config config 'config'
 	# автоматически при смене даты
 	option ssid_schedule '1'
 	option ssid_base 'Guest'
+	# Доступ гостей к самому роутеру: 1 = запрет (кроме DHCP/DNS), 0 = разрешить
+	option fw_block_router '1'
+	# Ограничение полосы для гостей, кбит/с (0 = без ограничения; суммарно на
+	# все устройства сети; down = из интернета к гостям, up = от гостей)
+	option limit_enabled '0'
+	option limit_down '0'
+	option limit_up '0'

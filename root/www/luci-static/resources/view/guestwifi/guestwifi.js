@@ -142,6 +142,20 @@ return view.extend({
 		var ssidBaseVal = uci.get(cfgName, 'config', 'ssid_base');
 		if (ssidBaseVal == null) ssidBaseVal = 'Guest';
 
+		var fwBlockVal = uci.get(cfgName, 'config', 'fw_block_router');
+		if (fwBlockVal == null) fwBlockVal = '1';
+
+		var limitOnVal = uci.get(cfgName, 'config', 'limit_enabled');
+		if (limitOnVal == null) limitOnVal = '0';
+		function mbitOf(kbit) {
+			var n = parseFloat(kbit);
+			if (!isFinite(n) || n <= 0)
+				return '';
+			return String(Number((n / 1000).toFixed(1))).replace(/\.0+$/, '').replace(/\.$/, '');
+		}
+		var downVal = mbitOf(uci.get(cfgName, 'config', 'limit_down'));
+		var upVal = mbitOf(uci.get(cfgName, 'config', 'limit_up'));
+
 		var grid = this.scheduleGrid(scheduleToks);
 
 		var statusHost = E('div', { 'id': 'gw-status', 'class': 'cbi-section' });
@@ -154,6 +168,19 @@ return view.extend({
 
 		var swSsid = E('input', { 'type': 'checkbox' });
 		swSsid.checked = (ssidSchVal === '1');
+
+		var swFw = E('input', { 'type': 'checkbox' });
+		swFw.checked = (fwBlockVal === '1');
+
+		var swLimit = E('input', { 'type': 'checkbox' });
+		swLimit.checked = (limitOnVal === '1');
+
+		var inDown = E('input', { 'type': 'number', 'class': 'gw-mini',
+			'min': '0.1', 'step': '0.1', 'placeholder': '50' });
+		inDown.value = downVal;
+		var inUp = E('input', { 'type': 'number', 'class': 'gw-mini',
+			'min': '0.1', 'step': '0.1', 'placeholder': '10' });
+		inUp.value = upVal;
 
 		var selMode = E('select', { 'class': 'cbi-input-select' });
 		[ ['always', _('Всегда включена')],
@@ -231,6 +258,16 @@ return view.extend({
 			if (!base && swSsid.checked)
 				errs.push(_('Укажите имя сети SSID'));
 
+			var kbDown = 0, kbUp = 0;
+			if (swLimit.checked) {
+				kbDown = Math.round(parseFloat(inDown.value) * 1000);
+				kbUp = Math.round(parseFloat(inUp.value) * 1000);
+				if (!(kbDown > 0) || !(kbUp > 0))
+					errs.push(_('Укажите пределы скорости (больше 0)'));
+				else if (kbDown > 1000000 || kbUp > 1000000)
+					errs.push(_('Слишком большое значение скорости'));
+			}
+
 			if (errs.length) {
 				ui.addNotification(_('Ошибка в расписании'), E('p', {}, errs.join(' · ')), 'error');
 				return;
@@ -240,6 +277,10 @@ return view.extend({
 			uci.set(cfgName, 'config', 'mode', selMode.value);
 			uci.set(cfgName, 'config', 'ssid_schedule', swSsid.checked ? '1' : '0');
 			uci.set(cfgName, 'config', 'ssid_base', base);
+			uci.set(cfgName, 'config', 'fw_block_router', swFw.checked ? '1' : '0');
+			uci.set(cfgName, 'config', 'limit_enabled', swLimit.checked ? '1' : '0');
+			uci.set(cfgName, 'config', 'limit_down', String(swLimit.checked ? kbDown : 0));
+			uci.set(cfgName, 'config', 'limit_up', String(swLimit.checked ? kbUp : 0));
 
 			uci.unset(cfgName, 'config', 'schedule');
 			if (sched.length)
@@ -255,6 +296,7 @@ return view.extend({
 				el.addEventListener('change', stageConfig);
 		}
 		hook(swEnabled); hook(selMode); hook(swSsid); hook(inSsidBase);
+		hook(swFw); hook(swLimit); hook(inDown); hook(inUp);
 		dayRows.forEach(function(r) {
 			hook(r._gw.cb); hook(r._gw.t1); hook(r._gw.t2);
 		});
@@ -303,6 +345,34 @@ return view.extend({
 				]),
 				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
 					_('Интервал может пересекать полночь (напр. 22:00 — 02:00).')) ])
+			]),
+
+			E('fieldset', { 'class': 'cbi-section' }, [
+				E('legend', {}, _('Доступ к роутеру')),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('Запретить гостям доступ к роутеру')),
+					E('div', { 'class': 'cbi-value-field' }, [ swFw ])
+				]),
+				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
+					_('При включении гостевые клиенты не могут войти в настройки роутера (LuCI/SSH и другие порты) — им доступны только DHCP и DNS. При выключении гостям разрешён полный доступ к самому роутеру; выход в интернет определяется отдельными правилами.')) ])
+			]),
+
+			E('fieldset', { 'class': 'cbi-section' }, [
+				E('legend', {}, _('Ограничение скорости')),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('Ограничить полосу')),
+					E('div', { 'class': 'cbi-value-field' }, [ swLimit ])
+				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('Скачивание (к гостям), Мбит/с')),
+					E('div', { 'class': 'cbi-value-field' }, [ inDown ])
+				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('Отдача (от гостей), Мбит/с')),
+					E('div', { 'class': 'cbi-value-field' }, [ inUp ])
+				]),
+				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
+					_('Предел суммарный на всех гостей: делится между устройствами автоматически. 0 или пусто — без ограничения.')) ])
 			])
 		]);
 	}
