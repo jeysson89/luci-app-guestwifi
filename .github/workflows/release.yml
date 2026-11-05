@@ -49,18 +49,22 @@ jobs:
           NAME=$(curl -fsSL "${BASE}/" | grep -o 'openwrt-sdk-[^"<]*\.tar\.zst' | head -n 1)
           test -n "$NAME" || { echo "SDK archive not found for ${VER}"; exit 1; }
           echo "Downloading ${NAME}"
-          curl -fsSL -o sdk.tar.zst "${BASE}/${NAME}"
-          tar --zstd -xf sdk.tar.zst
-          SDKDIR=$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)
+          rm -rf "$RUNNER_TEMP/sdk"
+          mkdir -p "$RUNNER_TEMP/sdk"
+          curl -fsSL -o "$RUNNER_TEMP/sdk/sdk.tar.zst" "${BASE}/${NAME}"
+          tar --zstd -xf "$RUNNER_TEMP/sdk/sdk.tar.zst" -C "$RUNNER_TEMP/sdk"
+          SDKDIR=$(find "$RUNNER_TEMP/sdk" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)
           test -n "$SDKDIR" || { echo "SDK dir not found"; exit 1; }
           echo "dir=${SDKDIR}" >> "$GITHUB_OUTPUT"
 
       - name: Copy package into SDK
         run: |
-          cd "${{ steps.sdk.outputs.dir }}"
-          mkdir -p package/luci-app-guestwifi
+          SDK="${{ steps.sdk.outputs.dir }}"
+          rm -rf "$SDK/package/luci-app-guestwifi"
+          mkdir -p "$SDK/package/luci-app-guestwifi"
           rsync -a --exclude .git --exclude .github \
-            "$GITHUB_WORKSPACE/" package/luci-app-guestwifi/
+            "$GITHUB_WORKSPACE/" "$SDK/package/luci-app-guestwifi/"
+          ls "$SDK/package/luci-app-guestwifi"
 
       - name: Install feeds
         run: |
@@ -115,5 +119,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes "Пакеты luci-app-guestwifi: .ipk (opkg, OpenWrt 24.10) и .apk (apk-tools, OpenWrt 25.x). Установка — см. README в разделе «Установка из релиза». Для 25.x: apk add --allow-unsigned ./luci-app-guestwifi-*.apk" \
-            artifacts/* \
-            --fail-on-empty
+            artifacts/*
