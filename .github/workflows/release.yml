@@ -83,11 +83,11 @@ jobs:
         run: |
           cd "${{ steps.sdk.outputs.dir }}"
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp -v bin/packages/*/luci-app-guestwifi*.{ipk,apk} \
-            "$GITHUB_WORKSPACE/artifacts/" 2>/dev/null || \
-          find bin packages -type f \( \
+          find bin -type f \( \
             -name 'luci-app-guestwifi*.ipk' -o -name 'luci-app-guestwifi*.apk' \) \
             -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
+          test -n "$(ls "$GITHUB_WORKSPACE/artifacts" 2>/dev/null)" \
+            || { echo "No package artifact found"; exit 1; }
           ls -la "$GITHUB_WORKSPACE/artifacts"
 
       - uses: actions/upload-artifact@v4

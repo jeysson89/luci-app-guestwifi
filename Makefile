@@ -5,7 +5,7 @@ LUCI_DEPENDS:=+luci-base +firewall4 +ucode-mod-uci
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=r1
+PKG_RELEASE:=1
 
 define Package/$(PKG_NAME)/conffiles
 /etc/config/guestwifi
