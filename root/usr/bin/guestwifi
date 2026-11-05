@@ -145,35 +145,90 @@ shaper_running() {
 	return 1
 }
 
+# сетевой префикс гостевой подсети: '192.168.9.1' -> '192.168.9.'
+guest_prefix() {
+	local ip
+	ip=$(uciget network.guest.ipaddr)
+	echo "$ip" | sed -n 's/^\([0-9]*\.[0-9]*\.[0-9]*\.\).*/\1/p'
+}
+
+# активные IP клиентов гостевой сети из DHCP-аренды
+guest_leases() {
+	local p
+	p=$(guest_prefix)
+	[ -n "$p" ] || return 0
+	awk -v P="$p" '{ if (substr($3,1,length(P)) == P) print $3 }' \
+		/tmp/dhcp.leases 2>/dev/null | sort -u
+}
+
+# сигнатура настроек шейдера + списка клиентов (для пересборки при изменениях)
+shaper_sig() {
+	echo "$(uciget "$CFG.config.limit_down")|$(uciget "$CFG.config.limit_up")|$(uciget "$CFG.config.limit_per")|$(guest_leases | tr '\n' ',')"
+}
+
 shaper_apply() {
-	local TC down up dev
+	local TC down up per dev
 	TC="$(tcpath)"
 	[ -n "$TC" ] && [ -x "$TC" ] || { log "tc не найден — ограничение скорости пропущено"; return 0; }
 
 	down=$(bg_rate "$(uciget "$CFG.config.limit_down")")
 	up=$(bg_rate "$(uciget "$CFG.config.limit_up")")
+	per=$(bg_rate "$(uciget "$CFG.config.limit_per")")
 
 	modprobe sch_htb 2>/dev/null
 	modprobe sch_ingress 2>/dev/null
 	modprobe act_police 2>/dev/null
 	modprobe cls_matchall 2>/dev/null
+	modprobe cls_u32 2>/dev/null
 
+	local ips total n
+	ips=$(guest_leases)
+
+	# пересборка с нуля: классы/фильтры зависят от списка клиентов
 	for dev in $(bridge_members); do
 		[ -d "/sys/class/net/$dev" ] || continue
+		$TC qdisc del dev "$dev" root 2>/dev/null
+		$TC qdisc del dev "$dev" ingress 2>/dev/null
 
-		if [ "$down" -gt 0 ]; then
-			$TC qdisc replace dev "$dev" root handle 1: htb default 10 2>/dev/null
-			$TC class replace dev "$dev" parent 1: classid 1:10 htb rate "${down}kbit" ceil "${down}kbit" 2>/dev/null
-		else
-			$TC qdisc del dev "$dev" root 2>/dev/null
+		# egress = трафик к гостям (скачивание)
+		if [ "$down" -gt 0 ] || [ "$per" -gt 0 ]; then
+			total="$down"
+			[ "$total" -eq 0 ] && total=100000
+			$TC qdisc add dev "$dev" root handle 1: htb default 10 2>/dev/null
+			$TC class add dev "$dev" parent 1: classid 1:10 htb rate "${total}kbit" ceil "${total}kbit" 2>/dev/null
 		fi
 
-		if [ "$up" -gt 0 ]; then
-			$TC qdisc replace dev "$dev" ingress 2>/dev/null
-			$TC filter replace dev "$dev" ingress matchall action police \
-				rate "${up}kbit" burst 512k conform-exceed drop 2>/dev/null
-		else
-			$TC qdisc del dev "$dev" ingress 2>/dev/null
+		n=0
+		if [ "$per" -gt 0 ]; then
+			# личный класс каждому клиенту; прочие IP → общий класс 1:10
+			local ip
+			for ip in $ips; do
+				n=$((n+1))
+				$TC class add dev "$dev" parent 1: classid "1:$(printf '%x' $((n+19)))" \
+					htb rate "${per}kbit" ceil "${total}kbit" 2>/dev/null
+				$TC filter add dev "$dev" protocol ip parent 1: prio $n \
+					u32 match ip dst "$ip/32" flowid "1:$(printf '%x' $((n+19)))" 2>/dev/null
+			done
+		fi
+
+		if [ "$up" -gt 0 ] || [ "$per" -gt 0 ]; then
+			$TC qdisc add dev "$dev" ingress 2>/dev/null
+		fi
+
+		# ingress = трафик от гостей (отдача)
+		if [ "$per" -gt 0 ] && [ -n "$ips" ]; then
+			n=0
+			local ip
+			for ip in $ips; do
+				n=$((n+1))
+				$TC filter add dev "$dev" protocol ip parent ffff: prio $n \
+					u32 match ip src "$ip/32" police rate "${per}kbit" burst 512k \
+					conform-exceed drop 2>/dev/null
+			done
+		elif [ "$up" -gt 0 ]; then
+			$TC filter add dev "$dev" parent ffff: protocol all pref 49152 \
+				matchall action police rate "${up}kbit" burst 512k \
+				conform-exceed drop 2>/dev/null
 		fi
 	done
 }
@@ -247,10 +302,11 @@ apply_state() {
 }
 
 write_status() {
-	local on="$1" want="$2" ts i cur
+	local on="$1" want="$2" clients="$3" ts i cur
 	ts=$(date +%s)
 	{
 		echo -n "{\"now\":$ts,\"state\":\"$on\",\"expected\":\"$want\","
+		[ -n "$clients" ] && echo -n "\"clients\":$clients,"
 		first=1
 		for i in $(wifi_ifaces); do
 			cur=$(uciget "wireless.$i.ssid")
@@ -293,13 +349,24 @@ do_check() {
 		cur_on="$(is_on)"
 	fi
 
-	# скорость: полоса ограничивается только у активной сети
+	# скорость: полоса ограничивается только у активной сети;
+	# per-client классы пересобираются при изменении списка клиентов
+	local clients=""
 	if [ "$want" = "1" ] && [ "$(uciget "$CFG.config.limit_enabled")" = "1" ]; then
-		shaper_apply
+		local sig last
+		sig=$(shaper_sig)
+		last=$(cat /var/run/guestwifi.sig 2>/dev/null)
+		if [ "$sig" != "$last" ]; then
+			shaper_apply
+			echo "$sig" > /var/run/guestwifi.sig 2>/dev/null
+		fi
+		[ "$(bg_rate "$(uciget "$CFG.config.limit_per")")" -gt 0 ] && \
+			clients=$(guest_leases | grep -c .)
 	else
 		if shaper_running; then
 			shaper_clear
 		fi
+		rm -f /var/run/guestwifi.sig 2>/dev/null
 	fi
 
 	# доступ гостей к самому роутеру (firewall zone input)
@@ -311,7 +378,7 @@ do_check() {
 		echo "ssid=$ssid"
 	} > "$STATE"
 
-	write_status "$cur_on" "$want"
+	write_status "$cur_on" "$want" "$clients"
 }
 
 do_status() {

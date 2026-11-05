@@ -71,7 +71,7 @@ return view.extend({
 
 				var t2 = [];
 				Object.keys(data).forEach(function(k) {
-					if (k === 'state' || k === 'expected' || k === 'now')
+					if (k === 'state' || k === 'expected' || k === 'now' || k === 'clients')
 						return;
 					var w = data[k];
 					t2.push(E('tr', {}, [
@@ -91,6 +91,10 @@ return view.extend({
 						E('td', {}, (data.expected === '1') ? _('ВКЛ') : _('ВЫКЛ'))
 					])
 				]));
+
+				if (data.clients != null)
+					rows.push(E('div', { 'class': 'cbi-value-description' },
+						_('Клиентов с лимитом: ') + data.clients));
 
 				if (t2.length)
 					rows.push(E('table', { 'class': 'table' }, t2));
@@ -155,6 +159,7 @@ return view.extend({
 		}
 		var downVal = mbitOf(uci.get(cfgName, 'config', 'limit_down'));
 		var upVal = mbitOf(uci.get(cfgName, 'config', 'limit_up'));
+		var perVal = mbitOf(uci.get(cfgName, 'config', 'limit_per'));
 
 		var grid = this.scheduleGrid(scheduleToks);
 
@@ -181,6 +186,9 @@ return view.extend({
 		var inUp = E('input', { 'type': 'number', 'class': 'gw-mini',
 			'min': '0.1', 'step': '0.1', 'placeholder': '10' });
 		inUp.value = upVal;
+		var inPer = E('input', { 'type': 'number', 'class': 'gw-mini',
+			'min': '0.1', 'step': '0.1', 'placeholder': '5' });
+		inPer.value = perVal;
 
 		var selMode = E('select', { 'class': 'cbi-input-select' });
 		[ ['always', _('Всегда включена')],
@@ -258,14 +266,16 @@ return view.extend({
 			if (!base && swSsid.checked)
 				errs.push(_('Укажите имя сети SSID'));
 
-			var kbDown = 0, kbUp = 0;
+			var kbDown = 0, kbUp = 0, kbPer = 0;
 			if (swLimit.checked) {
-				kbDown = Math.round(parseFloat(inDown.value) * 1000);
-				kbUp = Math.round(parseFloat(inUp.value) * 1000);
-				if (!(kbDown > 0) || !(kbUp > 0))
-					errs.push(_('Укажите пределы скорости (больше 0)'));
-				else if (kbDown > 1000000 || kbUp > 1000000)
-					errs.push(_('Слишком большое значение скорости'));
+				kbDown = Math.round(parseFloat(inDown.value) * 1000) || 0;
+				kbUp = Math.round(parseFloat(inUp.value) * 1000) || 0;
+				kbPer = Math.round(parseFloat(inPer.value) * 1000) || 0;
+				if (!(kbDown > 0) && !(kbUp > 0) && !(kbPer > 0))
+					errs.push(_('Укажите хотя бы один предел скорости'));
+				if (kbDown < 0 || kbUp < 0 || kbPer < 0 ||
+				    kbDown > 1000000 || kbUp > 1000000 || kbPer > 1000000)
+					errs.push(_('Некорректное значение скорости'));
 			}
 
 			if (errs.length) {
@@ -281,6 +291,7 @@ return view.extend({
 			uci.set(cfgName, 'config', 'limit_enabled', swLimit.checked ? '1' : '0');
 			uci.set(cfgName, 'config', 'limit_down', String(swLimit.checked ? kbDown : 0));
 			uci.set(cfgName, 'config', 'limit_up', String(swLimit.checked ? kbUp : 0));
+			uci.set(cfgName, 'config', 'limit_per', String(swLimit.checked ? kbPer : 0));
 
 			uci.unset(cfgName, 'config', 'schedule');
 			if (sched.length)
@@ -296,7 +307,7 @@ return view.extend({
 				el.addEventListener('change', stageConfig);
 		}
 		hook(swEnabled); hook(selMode); hook(swSsid); hook(inSsidBase);
-		hook(swFw); hook(swLimit); hook(inDown); hook(inUp);
+		hook(swFw); hook(swLimit); hook(inDown); hook(inUp); hook(inPer);
 		dayRows.forEach(function(r) {
 			hook(r._gw.cb); hook(r._gw.t1); hook(r._gw.t2);
 		});
@@ -371,8 +382,12 @@ return view.extend({
 					E('label', { 'class': 'cbi-value-title' }, _('Отдача (от гостей), Мбит/с')),
 					E('div', { 'class': 'cbi-value-field' }, [ inUp ])
 				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, _('На каждого гостя, Мбит/с')),
+					E('div', { 'class': 'cbi-value-field' }, [ inPer ])
+				]),
 				E('p', {}, [ E('span', { 'class': 'cbi-value-description' },
-					_('Предел суммарный на всех гостей: делится между устройствами автоматически. 0 или пусто — без ограничения.')) ])
+					_('«Скачивание» и «Отдача» — общий предел всей гостевой сети. «На каждого гостя» — персональный лимит одного устройства: никто не сможет занять весь канал (определяется по DHCP-устройствам гостевой подсети). Можно оставить общие поля пустыми и задать только личный лимит. 0 или пусто — без ограничения.')) ])
 			])
 		]);
 	}

@@ -19,3 +19,5 @@ config config 'config'
 	option limit_enabled '0'
 	option limit_down '0'
 	option limit_up '0'
+	# Лимит на каждого клиента, кбит/с (0 = общий лимит без деления на клиентов)
+	option limit_per '0'
