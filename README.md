@@ -72,7 +72,36 @@ python dev/gw-deploy.py
 Скрипт копирует файлы на `root@192.168.1.1`, запускает uci-defaults, рестартует
 rpcd/uhttpd, проверяет статус. Повторный запуск безопасен (идемпотентен).
 
-Для сборки пакета (apk/ipk) — OpenWrt buildroot, стандартный `make ./luci-app-guestwifi/compile`.
+## Установка из релиза (готовые пакеты)
+
+Скачайте пакет под вашу версию OpenWrt со страницы
+[Releases](https://github.com/jeysson89/luci-app-guestwifi/releases):
+
+- **OpenWrt 24.10** (`ipk`, пакетный менеджер opkg), файл: `luci-app-guestwifi_1.0.0-r1_all.ipk`;
+- **OpenWrt 25.x** (`apk`, пакетный менеджер apk-tools), файл вида `luci-app-guestwifi-1.0.0-r1.apk`.
+
+На роутере (пример, 24.10):
+
+```
+opkg update
+opkg install ./luci-app-guestwifi_1.0.0-r1_all.ipk
+```
+
+Для 25.x (пакет не подписан — устанавливается с разрешением неподписанных):
+
+```
+apk add --allow-unsigned ./luci-app-guestwifi-1.0.0-r1.apk
+```
+
+После установки перезагрузите роутер или выполните
+`/etc/uci-defaults/40_luci-guestwifi && /etc/init.d/guestwifi enable` —
+создадутся сеть `guest`, firewall-зона, AP-ы и cron; страница появится в
+LuCI: **Сеть → Гостевая Wi-Fi**.
+
+Для сборки пакета своими руками — OpenWrt buildroot (SDK соответствующей
+версии, целевой mediatek/filogic), стандартно
+`make package/luci-app-guestwifi/compile V=s`; готовый workflow сборки лежит
+в `.github/workflows/release.yml`.
 
 ## Проверка
 
