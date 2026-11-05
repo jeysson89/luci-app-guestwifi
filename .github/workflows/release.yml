@@ -1,0 +1,119 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ver24:
+        description: 'OpenWrt 24.10 version (.ipk / opkg)'
+        required: false
+        default: '24.10.8'
+      ver25:
+        description: 'OpenWrt 25.x version (.apk / apk-tools)'
+        required: false
+        default: '25.12.6'
+      tag:
+        description: 'Release tag'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.sdkver }} (${{ matrix.fmt }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdkver: ${{ github.event.inputs.ver24 }}
+            fmt: ipk
+          - sdkver: ${{ github.event.inputs.ver25 }}
+            fmt: apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison g++ gawk gcc \
+            gettext git libncurses-dev libssl-dev rsync unzip zlib1g-dev \
+            file zstd curl
+
+      - name: Download OpenWrt SDK ${{ matrix.sdkver }}
+        id: sdk
+        run: |
+          VER="${{ matrix.sdkver }}"
+          BASE="https://downloads.openwrt.org/releases/${VER}/targets/mediatek/filogic"
+          NAME=$(curl -fsSL "${BASE}/" | grep -o 'openwrt-sdk-[^"<]*\.tar\.zst' | head -n 1)
+          test -n "$NAME" || { echo "SDK archive not found for ${VER}"; exit 1; }
+          echo "Downloading ${NAME}"
+          curl -fsSL -o sdk.tar.zst "${BASE}/${NAME}"
+          tar --zstd -xf sdk.tar.zst
+          SDKDIR=$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)
+          test -n "$SDKDIR" || { echo "SDK dir not found"; exit 1; }
+          echo "dir=${SDKDIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy package into SDK
+        run: |
+          cd "${{ steps.sdk.outputs.dir }}"
+          mkdir -p package/luci-app-guestwifi
+          rsync -a --exclude .git --exclude .github \
+            "$GITHUB_WORKSPACE/" package/luci-app-guestwifi/
+
+      - name: Install feeds
+        run: |
+          cd "${{ steps.sdk.outputs.dir }}"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Build
+        run: |
+          cd "${{ steps.sdk.outputs.dir }}"
+          echo "CONFIG_PACKAGE_luci-app-guestwifi=m" >> .config
+          make defconfig
+          make package/luci-app-guestwifi/compile V=s -j$(nproc)
+
+      - name: Collect package file
+        run: |
+          cd "${{ steps.sdk.outputs.dir }}"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp -v bin/packages/*/luci-app-guestwifi*.{ipk,apk} \
+            "$GITHUB_WORKSPACE/artifacts/" 2>/dev/null || \
+          find bin packages -type f \( \
+            -name 'luci-app-guestwifi*.ipk' -o -name 'luci-app-guestwifi*.apk' \) \
+            -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
+          ls -la "$GITHUB_WORKSPACE/artifacts"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guestwifi-${{ matrix.sdkver }}
+          path: artifacts/
+          if-no-files-found: error
+
+  release:
+    name: create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          ls -la artifacts
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "Пакеты luci-app-guestwifi: .ipk (opkg, OpenWrt 24.10) и .apk (apk-tools, OpenWrt 25.x). Установка — см. README в разделе «Установка из релиза». Для 25.x: apk add --allow-unsigned ./luci-app-guestwifi-*.apk" \
+            artifacts/* \
+            --fail-on-empty
